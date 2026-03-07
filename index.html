@@ -92,8 +92,7 @@
       white-space: nowrap;
       text-shadow: 0 0 12px rgba(232,198,112,0.5);
       pointer-events: none;
-      animation: hintFloat 2.4s ease-in-out infinite;
-      /* Appears after envelope opens */
+      /* Appears after envelope opens, then floats */
       opacity: 0;
       animation: hintAppear 0.8s ease forwards 4.5s, hintFloat 2.4s ease-in-out infinite 5.3s;
     }
@@ -725,10 +724,6 @@
       42%      { transform:scale(1.12); }
       56%      { transform:scale(1); }
     }
-      50%      { box-shadow: 0 0 0 1px rgba(232,198,112,0.18), 0 12px 40px rgba(0,0,0,0.55), 0 0 55px rgba(232,198,112,0.18), 0 0 90px rgba(107,70,193,0.1), inset 0 1px 0 rgba(255,255,255,0.09); }
-    }
-    .qr-card::after  { bottom: 10px; right: 10px; border-width: 0 2px 2px 0; border-radius: 0 0 4px 0; }
-
 
     /* =============================================
        QR LINK BUTTON
@@ -1146,7 +1141,6 @@
       </div>
       <div class="pq-rule pq-rule-bottom"></div>
     </div>
-    </div>
 
     <!-- QR LINK -->
     <div class="qr-link-wrap reveal">
@@ -1259,120 +1253,122 @@
     })();
 
     /* ===========================================
-       2. MOUSE PARALLAX
+       2. MOUSE PARALLAX  (throttled to 30fps)
     =========================================== */
     (function() {
       const pat = document.getElementById('heroPattern');
-      let tx = 0, ty = 0, cx = 0, cy = 0;
+      let tx = 0, ty = 0, cx = 0, cy = 0, lastT = 0;
       const lerp = (a,b,t) => a + (b-a)*t;
       document.addEventListener('mousemove', e => {
         tx = (e.clientX/innerWidth  - 0.5) * 2.0;
         ty = (e.clientY/innerHeight - 0.5) * 2.0;
       });
-      (function loop() {
+      (function loop(now) {
+        requestAnimationFrame(loop);
+        if (now - lastT < 33) return;
+        lastT = now;
         cx = lerp(cx, tx, 0.05);
         cy = lerp(cy, ty, 0.05);
         pat.style.transform = `translate(${cx}%,${cy}%)`;
-        requestAnimationFrame(loop);
-      })();
+      })(0);
     })();
 
     /* ===========================================
-       3. FLOATING PETALS CANVAS
+       3. FLOATING PETALS CANVAS  (optimized)
     =========================================== */
+    window._petalPaused = false; // confetti can pause petals
+
     (function() {
       const cv  = document.getElementById('petalCanvas');
-      const ctx = cv.getContext('2d');
-      const MAX = 42;
+      const ctx = cv.getContext('2d', { alpha: true, willReadFrequently: false });
+      const MAX = 22;  // was 42
       let W, H, parts = [];
 
       const resize = () => { W = cv.width = innerWidth; H = cv.height = innerHeight; };
       addEventListener('resize', resize); resize();
 
-      const colors = [
-        'rgba(248,165,200,','rgba(232,198,112,',
-        'rgba(248,200,215,','rgba(210,140,185,','rgba(255,220,180,'
-      ];
+      /* Pre-bake each petal shape once into an offscreen canvas.
+         No more per-frame createRadialGradient / bezier recalculation. */
+      const PETAL_COLORS = ['#F8A5C8','#E8C670','#F8C8D7','#D28CB9','#FFE0B4'];
+      const PETAL_SIZES  = [8, 11, 14];   // discrete sizes → small cache
+
+      const petalCache = {};
+      function bakePetal(colorHex, size) {
+        const key = colorHex + size;
+        if (petalCache[key]) return petalCache[key];
+        const oc = document.createElement('canvas');
+        oc.width = oc.height = size * 3;
+        const ox = oc.getContext('2d');
+        const s  = size;
+        ox.translate(s * 1.5, s * 1.5);
+        // soft glow — drawn once, reused forever
+        const g = ox.createRadialGradient(0, 0, 0, 0, 0, s * 1.4);
+        g.addColorStop(0, colorHex + 'cc');
+        g.addColorStop(1, colorHex + '00');
+        ox.fillStyle = g;
+        ox.beginPath(); ox.arc(0, 0, s * 1.4, 0, Math.PI * 2); ox.fill();
+        // petal shape
+        ox.fillStyle = colorHex + 'dd';
+        ox.beginPath();
+        ox.moveTo(0, -s);
+        ox.bezierCurveTo(s * .6, -s * .4, s * .6, s * .4, 0, s * .5);
+        ox.bezierCurveTo(-s * .6, s * .4, -s * .6, -s * .4, 0, -s);
+        ox.fill();
+        petalCache[key] = oc;
+        return oc;
+      }
+      // pre-bake all combos at startup
+      PETAL_COLORS.forEach(c => PETAL_SIZES.forEach(s => bakePetal(c, s)));
 
       function make(init) {
-        const type = Math.random()<0.72 ? 'petal' : Math.random()<0.6 ? 'heart' : 'star';
-        const ox   = Math.random()*W;
+        const size  = PETAL_SIZES[0 | Math.random() * PETAL_SIZES.length];
+        const color = PETAL_COLORS[0 | Math.random() * PETAL_COLORS.length];
+        const ox    = Math.random() * W;
         return {
-          type, ox,
-          x: ox, y: init ? Math.random()*H : H+20,
-          size:    0.7 + Math.random()*1.5,
-          speed:   0.34 + Math.random()*0.5,
-          sway:    Math.random()*Math.PI*2,
-          swaySpd: 0.005 + Math.random()*0.01,
-          swayAmp: 18 + Math.random()*26,
-          rot:     Math.random()*Math.PI*2,
-          rotSpd:  (Math.random()-0.5)*0.04,
-          alpha:   0.35 + Math.random()*0.5,
-          col:     colors[0|Math.random()*colors.length]
+          img: bakePetal(color, size),
+          hw:  size * 1.5,
+          ox,
+          x:       ox,
+          y:       init ? Math.random() * H : H + 20,
+          speed:   0.3 + Math.random() * 0.45,
+          sway:    Math.random() * Math.PI * 2,
+          swaySpd: 0.004 + Math.random() * 0.008,
+          swayAmp: 16 + Math.random() * 22,
+          rot:     Math.random() * Math.PI * 2,
+          rotSpd:  (Math.random() - 0.5) * 0.03,
+          alpha:   0.4 + Math.random() * 0.45,
         };
       }
 
-      for (let i=0;i<MAX;i++) parts.push(make(true));
+      for (let i = 0; i < MAX; i++) parts.push(make(true));
 
-      function draw(p) {
-        ctx.save();
-        ctx.translate(p.x, p.y);
-        ctx.rotate(p.rot);
-        const g = ctx.createRadialGradient(0,0,0,0,0,p.size*9);
-        g.addColorStop(0, p.col + (p.alpha*0.28) + ')');
-        g.addColorStop(1, p.col + '0)');
-        ctx.globalAlpha = p.alpha * 0.55;
-        ctx.fillStyle = g;
-        ctx.beginPath(); ctx.arc(0,0,p.size*9,0,Math.PI*2); ctx.fill();
-        ctx.globalAlpha = p.alpha;
-        ctx.fillStyle   = p.col + p.alpha + ')';
-        const s = p.size*7;
+      /* Throttle to ~30 fps — petals are slow-moving, 60fps is wasted here */
+      let lastT = 0;
+      (function loop(now) {
+        requestAnimationFrame(loop);
+        if (now - lastT < 33) return;   // skip frame if < 33ms elapsed (~30fps)
+        lastT = now;
 
-        if (p.type === 'petal') {
-          ctx.beginPath();
-          ctx.moveTo(0,-s);
-          ctx.bezierCurveTo(s*.6,-s*.4, s*.6,s*.4, 0,s*.5);
-          ctx.bezierCurveTo(-s*.6,s*.4,-s*.6,-s*.4, 0,-s);
-          ctx.fill();
-        } else if (p.type === 'heart') {
-          ctx.beginPath();
-          ctx.moveTo(0,s*.3);
-          ctx.bezierCurveTo(-s*.9,-s*.4,-s*1.1,s*.6, 0,s*1.1);
-          ctx.bezierCurveTo(s*1.1,s*.6,s*.9,-s*.4, 0,s*.3);
-          ctx.fill();
-        } else {
-          ctx.beginPath();
-          for (let j=0;j<5;j++) {
-            const a1=(j*4*Math.PI/5)-Math.PI/2;
-            const a2=((j*4+2)*Math.PI/5)-Math.PI/2;
-            if(j===0) ctx.moveTo(Math.cos(a1)*s,Math.sin(a1)*s);
-            else      ctx.lineTo(Math.cos(a1)*s,Math.sin(a1)*s);
-            ctx.lineTo(Math.cos(a2)*s*.4,Math.sin(a2)*s*.4);
-          }
-          ctx.closePath(); ctx.fill();
-        }
-        ctx.restore();
-      }
+        if (window._petalPaused) { ctx.clearRect(0, 0, W, H); return; }
 
-      (function loop() {
-        ctx.clearRect(0,0,W,H);
+        ctx.clearRect(0, 0, W, H);
         for (const p of parts) {
           p.sway += p.swaySpd;
-          p.x = p.ox + Math.sin(p.sway)*p.swayAmp;
-          p.y -= p.speed;
-          p.rot += p.rotSpd;
+          p.x     = p.ox + Math.sin(p.sway) * p.swayAmp;
+          p.y    -= p.speed;
+          p.rot  += p.rotSpd;
           if (p.y < -30) {
             const fresh = make(false);
-            p.type=fresh.type; p.ox=fresh.ox; p.x=fresh.x; p.y=fresh.y;
-            p.size=fresh.size; p.speed=fresh.speed; p.sway=fresh.sway;
-            p.swaySpd=fresh.swaySpd; p.swayAmp=fresh.swayAmp;
-            p.rot=fresh.rot; p.rotSpd=fresh.rotSpd;
-            p.alpha=fresh.alpha; p.col=fresh.col;
+            Object.assign(p, fresh);
           }
-          draw(p);
+          ctx.save();
+          ctx.globalAlpha = p.alpha;
+          ctx.translate(p.x, p.y);
+          ctx.rotate(p.rot);
+          ctx.drawImage(p.img, -p.hw, -p.hw);
+          ctx.restore();
         }
-        requestAnimationFrame(loop);
-      })();
+      })(0);
     })();
 
     /* ===========================================
@@ -1394,91 +1390,158 @@
     })();
 
     /* ===========================================
-       5. CONFETTI + TOAST
+       5. CONFETTI + TOAST  (optimized)
     =========================================== */
     (function() {
       const cv  = document.getElementById('confettiCanvas');
-      const ctx = cv.getContext('2d');
-      let W, H, pieces = [], endTime = 0, running = false;
+      // willReadFrequently:false — we only write, never read pixels
+      const ctx = cv.getContext('2d', { alpha: true, willReadFrequently: false });
 
-      const resize = () => { W = cv.width = innerWidth; H = cv.height = innerHeight; };
-      addEventListener('resize', resize); resize();
+      let W, H;
+      const resize = () => {
+        W = cv.width  = innerWidth;
+        H = cv.height = innerHeight;
+      };
+      addEventListener('resize', resize);
+      resize();
 
-      const cols = ['#F8A5C8','#E8C670','#f0d4a0','#e8a0c8','#ffd0e8','#ffeaa0','#d4a8e8','#ffb8d4'];
+      /* ── palette ── */
+      const COLS = ['#F8A5C8','#E8C670','#f0d4a0','#e8a0c8','#ffd0e8','#ffeaa0','#d4a8e8','#ffb8d4'];
 
+      /* ── pre-bake shapes onto offscreen canvases so we never recalculate paths ── */
+      const SIZES = [5, 7, 9, 11];      // 4 discrete sizes
+      const TYPES = ['rect','circle','heart'];
+      const cache = {};                  // key: "type-size-color"
+
+      function bake(type, size, color) {
+        const key = type + size + color;
+        if (cache[key]) return cache[key];
+        const s  = size;
+        const oc = document.createElement('canvas');
+        oc.width = oc.height = s * 3;
+        const ox = oc.getContext('2d');
+        ox.fillStyle = color;
+        ox.translate(s * 1.5, s * 1.5);
+        ox.beginPath();
+        if (type === 'rect') {
+          ox.rect(-s * 0.5, -s * 0.8, s, s * 1.6);   // tall rectangle — fastest
+        } else if (type === 'circle') {
+          ox.arc(0, 0, s * 0.7, 0, Math.PI * 2);
+        } else {                                        // heart
+          ox.moveTo(0, s * 0.3);
+          ox.bezierCurveTo(-s * 0.9, -s * 0.4, -s * 1.1,  s * 0.6, 0, s * 1.1);
+          ox.bezierCurveTo( s * 1.1,  s * 0.6,  s * 0.9, -s * 0.4, 0, s * 0.3);
+        }
+        ox.fill();
+        cache[key] = oc;
+        return oc;
+      }
+
+      /* Pre-bake all combos at startup (tiny cost, saves per-frame work) */
+      TYPES.forEach(t => SIZES.forEach(s => COLS.forEach(c => bake(t, s, c))));
+
+      /* ── particle pool — fixed array, no splice ever ── */
+      const MAX    = 55;
+      const pool   = new Array(MAX);
+      let   active = 0;
+
+      function reset(p) {
+        const size  = SIZES[0 | Math.random() * SIZES.length];
+        const type  = TYPES[0 | Math.random() * TYPES.length];
+        const color = COLS [0 | Math.random() * COLS.length];
+        p.img   = bake(type, size, color);
+        p.hw    = size * 1.5;           // half canvas size for centering
+        p.x     = Math.random() * W;
+        p.y     = -10 - Math.random() * 50;
+        p.vx    = (Math.random() - 0.5) * 3.5;
+        p.vy    = 1.4 + Math.random() * 3;
+        p.rot   = Math.random() * Math.PI * 2;
+        p.rotV  = (Math.random() - 0.5) * 0.10;
+        p.grav  = 0.035 + Math.random() * 0.035;
+        p.alpha = 1;
+        p.dead  = false;
+      }
+
+      for (let i = 0; i < MAX; i++) pool[i] = { dead: true };
+
+      /* ── spawn n particles (respects MAX cap) ── */
       function spawn(n) {
-        for (let i=0;i<n;i++) {
-          const t = Math.random()<0.55?'petal':Math.random()<0.6?'heart':'star';
-          pieces.push({
-            type:t, x:Math.random()*W, y:-10-Math.random()*60,
-            vx:(Math.random()-.5)*4, vy:1.5+Math.random()*3.5,
-            rot:Math.random()*Math.PI*2, rotV:(Math.random()-.5)*.12,
-            size:5+Math.random()*9,
-            color:cols[0|Math.random()*cols.length],
-            alpha:1, grav:0.04+Math.random()*.04
-          });
+        let spawned = 0;
+        for (let i = 0; i < MAX && spawned < n; i++) {
+          if (pool[i].dead) { reset(pool[i]); active++; spawned++; }
         }
       }
 
-      function drawP(p) {
-        ctx.save();
-        ctx.translate(p.x,p.y); ctx.rotate(p.rot);
-        ctx.globalAlpha = p.alpha; ctx.fillStyle = p.color;
-        const s = p.size;
-        if (p.type==='petal') {
-          ctx.beginPath();
-          ctx.moveTo(0,-s);
-          ctx.bezierCurveTo(s*.6,-s*.4,s*.6,s*.4,0,s*.5);
-          ctx.bezierCurveTo(-s*.6,s*.4,-s*.6,-s*.4,0,-s);
-          ctx.fill();
-        } else if (p.type==='heart') {
-          ctx.beginPath();
-          ctx.moveTo(0,s*.3);
-          ctx.bezierCurveTo(-s*.9,-s*.4,-s*1.1,s*.6,0,s*1.1);
-          ctx.bezierCurveTo(s*1.1,s*.6,s*.9,-s*.4,0,s*.3);
-          ctx.fill();
-        } else {
-          ctx.beginPath();
-          for(let j=0;j<5;j++){
-            const a1=(j*4*Math.PI/5)-Math.PI/2;
-            const a2=((j*4+2)*Math.PI/5)-Math.PI/2;
-            if(j===0) ctx.moveTo(Math.cos(a1)*s,Math.sin(a1)*s);
-            else      ctx.lineTo(Math.cos(a1)*s,Math.sin(a1)*s);
-            ctx.lineTo(Math.cos(a2)*s*.4,Math.sin(a2)*s*.4);
-          }
-          ctx.closePath(); ctx.fill();
-        }
-        ctx.restore();
-      }
+      /* ── render loop ── */
+      let endTime = 0;
+      let rafId   = null;
 
       function loop() {
-        ctx.clearRect(0,0,W,H);
+        ctx.clearRect(0, 0, W, H);
         const now  = Date.now();
         const left = endTime - now;
-        if (left > 1500 && Math.random()<0.45) spawn(3);
-        for (let i=pieces.length-1;i>=0;i--) {
-          const p = pieces[i];
-          p.vy += p.grav; p.x += p.vx; p.y += p.vy; p.rot += p.rotV;
-          if (left < 1500) p.alpha = Math.max(0, p.alpha - 0.011);
-          if (p.y > H+20 || p.alpha<=0) pieces.splice(i,1);
-          else drawP(p);
+
+        /* trickle-spawn during burst phase */
+        if (left > 1200 && Math.random() < 0.35) spawn(2);
+
+        let alive = 0;
+        for (let i = 0; i < MAX; i++) {
+          const p = pool[i];
+          if (p.dead) continue;
+
+          /* physics */
+          p.vy  += p.grav;
+          p.x   += p.vx;
+          p.y   += p.vy;
+          p.rot += p.rotV;
+
+          /* fade out in last 1.2 s */
+          if (left < 1200) p.alpha = Math.max(0, p.alpha - 0.018);
+
+          /* retire off-screen or fully faded */
+          if (p.y > H + 20 || p.alpha <= 0) { p.dead = true; active--; continue; }
+
+          /* draw using pre-baked offscreen canvas — just drawImage, no path work */
+          ctx.save();
+          ctx.globalAlpha = p.alpha;
+          ctx.translate(p.x, p.y);
+          ctx.rotate(p.rot);
+          ctx.drawImage(p.img, -p.hw, -p.hw);
+          ctx.restore();
+          alive++;
         }
-        if (now < endTime || pieces.length>0) requestAnimationFrame(loop);
-        else running = false;
+
+        if (now < endTime || alive > 0) {
+          rafId = requestAnimationFrame(loop);
+        } else {
+          rafId = null;
+        }
       }
 
       document.getElementById('ctaBtn').addEventListener('click', () => {
-        running = true;
-        endTime = Date.now() + 4500;
-        pieces = [];
-        spawn(60);
-        requestAnimationFrame(loop);
+        /* cancel any running loop */
+        if (rafId) cancelAnimationFrame(rafId);
 
+        /* kill all active particles */
+        for (let i = 0; i < MAX; i++) pool[i].dead = true;
+        active = 0;
+
+        /* pause petals while confetti runs — frees up GPU bandwidth */
+        window._petalPaused = true;
+
+        endTime = Date.now() + 4200;
+        spawn(32);
+        rafId = requestAnimationFrame(loop);
+
+        /* resume petals after confetti ends */
+        setTimeout(() => { window._petalPaused = false; }, 4600);
+
+        /* toast */
         const toast = document.getElementById('toast');
         toast.classList.remove('show');
         void toast.offsetWidth;
         toast.classList.add('show');
-        setTimeout(() => toast.classList.remove('show'), 4200);
+        setTimeout(() => toast.classList.remove('show'), 4000);
       });
     })();
 
